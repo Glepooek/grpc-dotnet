@@ -19,6 +19,7 @@
 using System;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Net;
 using System.Net.Http;
 using Grpc.Core;
 using Grpc.Shared;
@@ -67,7 +68,21 @@ namespace Grpc.Net.Client.Internal
 
         internal RpcException CreateRpcException(Status status)
         {
-            TryGetTrailers(out var trailers);
+            // This code can be called from a background task.
+            // If an error is thrown when parsing the trailers into a Metadata
+            // collection then the background task will never complete and
+            // the gRPC call will hang. If the trailers are invalid then log
+            // an error message and return an empty trailers collection
+            // on the RpcException that we want to return to the app.
+            Metadata? trailers = null;
+            try
+            {
+                TryGetTrailers(out trailers);
+            }
+            catch (Exception ex)
+            {
+                GrpcCallLog.ErrorParsingTrailers(Logger, ex);
+            }
             return new RpcException(status, trailers ?? Metadata.Empty);
         }
 
@@ -83,12 +98,91 @@ namespace Grpc.Net.Client.Internal
                     return false;
                 }
 
-                CompatibilityExtensions.Assert(HttpResponse != null);
+                CompatibilityHelpers.Assert(HttpResponse != null);
                 Trailers = GrpcProtocolHelpers.BuildMetadata(HttpResponse.TrailingHeaders());
             }
 
             trailers = Trailers;
             return true;
+        }
+
+        internal static Status? ValidateHeaders(HttpResponseMessage httpResponse, out Metadata? trailers)
+        {
+            // gRPC status can be returned in the header when there is no message (e.g. unimplemented status)
+            // An explicitly specified status header has priority over other failing statuses
+            if (GrpcProtocolHelpers.TryGetStatusCore(httpResponse.Headers, out var status))
+            {
+                // Trailers are in the header because there is no message.
+                // Note that some default headers will end up in the trailers (e.g. Date, Server).
+                trailers = GrpcProtocolHelpers.BuildMetadata(httpResponse.Headers);
+                return status;
+            }
+
+            trailers = null;
+
+            // ALPN negotiation is sending HTTP/1.1 and HTTP/2.
+            // Check that the response wasn't downgraded to HTTP/1.1.
+            if (httpResponse.Version < GrpcProtocolConstants.Http2Version)
+            {
+                return new Status(StatusCode.Internal, $"Bad gRPC response. Response protocol downgraded to HTTP/{httpResponse.Version.ToString(2)}.");
+            }
+
+            if (httpResponse.StatusCode != HttpStatusCode.OK)
+            {
+                var statusCode = MapHttpStatusToGrpcCode(httpResponse.StatusCode);
+                return new Status(statusCode, "Bad gRPC response. HTTP status code: " + (int)httpResponse.StatusCode);
+            }
+
+            if (httpResponse.Content?.Headers.ContentType == null)
+            {
+                return new Status(StatusCode.Cancelled, "Bad gRPC response. Response did not have a content-type header.");
+            }
+
+            var grpcEncoding = httpResponse.Content.Headers.ContentType;
+            if (!CommonGrpcProtocolHelpers.IsContentType(GrpcProtocolConstants.GrpcContentType, grpcEncoding?.MediaType))
+            {
+                return new Status(StatusCode.Cancelled, "Bad gRPC response. Invalid content-type value: " + grpcEncoding);
+            }
+
+            // Call is still in progress
+            return null;
+        }
+
+        private static StatusCode MapHttpStatusToGrpcCode(HttpStatusCode httpStatusCode)
+        {
+            switch (httpStatusCode)
+            {
+                case HttpStatusCode.BadRequest:  // 400
+#if !NETSTANDARD2_0
+                case HttpStatusCode.RequestHeaderFieldsTooLarge: // 431
+#else
+                case (HttpStatusCode)431:
+#endif
+                    return StatusCode.Internal;
+                case HttpStatusCode.Unauthorized:  // 401
+                    return StatusCode.Unauthenticated;
+                case HttpStatusCode.Forbidden:  // 403
+                    return StatusCode.PermissionDenied;
+                case HttpStatusCode.NotFound:  // 404
+                    return StatusCode.Unimplemented;
+#if !NETSTANDARD2_0
+                case HttpStatusCode.TooManyRequests:  // 429
+#else
+                case (HttpStatusCode)429:
+#endif
+                case HttpStatusCode.BadGateway:  // 502
+                case HttpStatusCode.ServiceUnavailable:  // 503
+                case HttpStatusCode.GatewayTimeout:  // 504
+                    return StatusCode.Unavailable;
+                default:
+                    if ((int)httpStatusCode >= 100 && (int)httpStatusCode < 200)
+                    {
+                        // 1xx. These headers should have been ignored.
+                        return StatusCode.Internal;
+                    }
+
+                    return StatusCode.Unknown;
+            }
         }
     }
 }

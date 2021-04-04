@@ -18,6 +18,7 @@
 
 using System;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -29,6 +30,7 @@ using Grpc.Net.ClientFactory.Internal;
 using Grpc.Tests.Shared;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Options;
@@ -45,7 +47,7 @@ namespace Grpc.AspNetCore.Server.ClientFactory.Tests
             var services = new ServiceCollection();
             var clientBuilder = services.AddHttpClient("TestClient");
 
-            var ex = Assert.Throws<InvalidOperationException>(() => clientBuilder.EnableCallContextPropagation());
+            var ex = Assert.Throws<InvalidOperationException>(() => clientBuilder.EnableCallContextPropagation())!;
             Assert.AreEqual("EnableCallContextPropagation must be used with a gRPC client.", ex.Message);
         }
 
@@ -56,7 +58,7 @@ namespace Grpc.AspNetCore.Server.ClientFactory.Tests
             services.AddGrpcClient<Greeter.GreeterClient>();
             var clientBuilder = services.AddHttpClient("TestClient");
 
-            var ex = Assert.Throws<InvalidOperationException>(() => clientBuilder.EnableCallContextPropagation());
+            var ex = Assert.Throws<InvalidOperationException>(() => clientBuilder.EnableCallContextPropagation())!;
             Assert.AreEqual("EnableCallContextPropagation must be used with a gRPC client.", ex.Message);
         }
 
@@ -93,6 +95,88 @@ namespace Grpc.AspNetCore.Server.ClientFactory.Tests
             // Assert
             Assert.AreEqual(deadline, options.Deadline);
             Assert.AreEqual(cancellationToken, options.CancellationToken);
+        }
+
+        [TestCase(Canceller.Context)]
+        [TestCase(Canceller.User)]
+        public async Task CreateClient_ServerCallContextAndUserCancellationToken_PropogatedDeadlineAndCancellation(Canceller canceller)
+        {
+            // Arrange
+            var baseAddress = new Uri("http://localhost");
+            var deadline = DateTime.UtcNow.AddDays(1);
+            var contextCts = new CancellationTokenSource();
+            var userCts = new CancellationTokenSource();
+            var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            CallOptions options = default;
+
+            var handler = TestHttpMessageHandler.Create(async (r, token) =>
+            {
+                token.Register(() => tcs.SetCanceled());
+
+                await tcs.Task;
+
+                var streamContent = await ClientTestHelpers.CreateResponseContent(new HelloReply()).DefaultTimeout();
+                return ResponseUtils.CreateResponse(HttpStatusCode.OK, streamContent);
+            });
+
+            var services = new ServiceCollection();
+            services.AddOptions();
+            services.AddSingleton(CreateHttpContextAccessorWithServerCallContext(deadline, contextCts.Token));
+            services
+                .AddGrpcClient<Greeter.GreeterClient>(o =>
+                {
+                    o.Address = baseAddress;
+                })
+                .EnableCallContextPropagation()
+                .AddInterceptor(() => new CallbackInterceptor(o => options = o))
+                .AddHttpMessageHandler(() => handler);
+
+            var serviceProvider = services.BuildServiceProvider(validateScopes: true);
+
+            var clientFactory = CreateGrpcClientFactory(serviceProvider);
+            var client = clientFactory.CreateClient<Greeter.GreeterClient>(nameof(Greeter.GreeterClient));
+
+            // Act
+            using var call = client.SayHelloAsync(new HelloRequest(), cancellationToken: userCts.Token);
+            var responseTask = call.ResponseAsync;
+
+            // Assert
+            Assert.AreEqual(deadline, options.Deadline);
+
+            // CancellationToken passed to call is a linked cancellation token.
+            // It's created from the context and user tokens.
+            Assert.AreNotEqual(contextCts.Token, options.CancellationToken);
+            Assert.AreNotEqual(userCts.Token, options.CancellationToken);
+            Assert.AreNotEqual(CancellationToken.None, options.CancellationToken);
+
+            Assert.IsFalse(responseTask.IsCompleted);
+
+            // Either CTS should cancel call.
+            switch (canceller)
+            {
+                case Canceller.Context:
+                    contextCts.Cancel();
+                    break;
+                case Canceller.User:
+                    userCts.Cancel();
+                    break;
+            }
+
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => responseTask).DefaultTimeout();
+            Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
+            ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseHeadersAsync).DefaultTimeout();
+            Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
+
+            Assert.AreEqual(StatusCode.Cancelled, call.GetStatus().StatusCode);
+            Assert.Throws<InvalidOperationException>(() => call.GetTrailers());
+        }
+
+        public enum Canceller
+        {
+            None,
+            Context,
+            User
         }
 
         [Test]
@@ -251,6 +335,7 @@ namespace Grpc.AspNetCore.Server.ClientFactory.Tests
             return new DefaultGrpcClientFactory(serviceProvider,
                 serviceProvider.GetRequiredService<GrpcCallInvokerFactory>(),
                 serviceProvider.GetRequiredService<IOptionsMonitor<GrpcClientFactoryOptions>>(),
+                serviceProvider.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>(),
                 serviceProvider.GetRequiredService<IHttpMessageHandlerFactory>());
         }
     }

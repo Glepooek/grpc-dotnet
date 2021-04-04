@@ -18,11 +18,15 @@
 
 using System;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace Grpc.Shared
 {
     internal static class CommonGrpcProtocolHelpers
     {
+        public static readonly Task<bool> TrueTask = Task.FromResult(true);
+        public static readonly Task<bool> FalseTask = Task.FromResult(false);
+
         // Timer and DateTime.UtcNow have a 14ms precision. Add a small delay when scheduling deadline
         // timer that tests if exceeded or not. This avoids rescheduling the deadline callback multiple
         // times when timer is triggered before DateTime.UtcNow reports the deadline has been exceeded.
@@ -31,7 +35,7 @@ namespace Grpc.Shared
         // - The timer is rescheduled to run in 0.5ms.
         // - The deadline callback is raised again and there is now 0.4ms until deadline.
         // - The timer is rescheduled to run in 0.4ms, etc.
-        private static readonly int TimerEpsilonMilliseconds = 4;
+        private static readonly int TimerEpsilonMilliseconds = 7;
 
         public static long GetTimerDueTime(TimeSpan timeout, long maxTimerDueTime)
         {
@@ -41,7 +45,7 @@ namespace Grpc.Shared
 
             // Add epislon to take into account Timer precision.
             // This will avoid rescheduling the timer multiple times, but means deadline
-            // might run for some extra milliseconds
+            // might run slightly longer than requested.
             dueTimeMilliseconds += TimerEpsilonMilliseconds;
 
             dueTimeMilliseconds = Math.Min(dueTimeMilliseconds, maxTimerDueTime);
@@ -101,7 +105,7 @@ namespace Grpc.Shared
             {
                 if (!first)
                 {
-                    sb.Append(" ");
+                    sb.Append(' ');
                 }
                 else
                 {

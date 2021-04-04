@@ -26,7 +26,7 @@ namespace Grpc.Net.ClientFactory.Internal
     // Should be registered as a singleton, so it that it can act as a cache for the Activator.
     internal class DefaultClientActivator<TClient> where TClient : class
     {
-        private readonly static Func<ObjectFactory> _createActivator = () => ActivatorUtilities.CreateFactory(typeof(TClient), new Type[] { typeof(CallInvoker), });
+        private readonly static Func<ObjectFactory> _createActivator = static () => ActivatorUtilities.CreateFactory(typeof(TClient), new Type[] { typeof(CallInvoker), });
 
         private readonly IServiceProvider _services;
         private ObjectFactory? _activator;
@@ -35,12 +35,7 @@ namespace Grpc.Net.ClientFactory.Internal
 
         public DefaultClientActivator(IServiceProvider services)
         {
-            if (services == null)
-            {
-                throw new ArgumentNullException(nameof(services));
-            }
-
-            _services = services;
+            _services = services ?? throw new ArgumentNullException(nameof(services));
         }
 
         public ObjectFactory Activator

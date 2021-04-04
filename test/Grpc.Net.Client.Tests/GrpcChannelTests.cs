@@ -23,6 +23,7 @@ using System.Threading.Tasks;
 using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Tests.Infrastructure;
+using Grpc.Net.Client.Configuration;
 using Grpc.Tests.Shared;
 using NUnit.Framework;
 
@@ -47,7 +48,7 @@ namespace Grpc.Net.Client.Tests
         {
             // Arrange & Act
             var ex = Assert.Throws<InvalidOperationException>(() => GrpcChannel.ForAddress("http://localhost",
-                CreateGrpcChannelOptions(o => o.Credentials = new SslCredentials())));
+                CreateGrpcChannelOptions(o => o.Credentials = new SslCredentials())))!;
 
             // Assert
             Assert.AreEqual("Channel is configured with secure channel credentials and can't use a HttpClient with a 'http' scheme.", ex.Message);
@@ -58,7 +59,7 @@ namespace Grpc.Net.Client.Tests
         {
             // Arrange & Act
             var ex = Assert.Throws<InvalidOperationException>(() => GrpcChannel.ForAddress("https://localhost",
-                CreateGrpcChannelOptions(o => o.Credentials = new SslCredentials("rootCertificates!!!"))));
+                CreateGrpcChannelOptions(o => o.Credentials = new SslCredentials("rootCertificates!!!"))))!;
 
             // Assert
             Assert.AreEqual(
@@ -94,7 +95,7 @@ namespace Grpc.Net.Client.Tests
         {
             // Arrange & Act
             var ex = Assert.Throws<InvalidOperationException>(() => GrpcChannel.ForAddress("https://localhost",
-                CreateGrpcChannelOptions(o => o.Credentials = ChannelCredentials.Insecure)));
+                CreateGrpcChannelOptions(o => o.Credentials = ChannelCredentials.Insecure)))!;
 
             // Assert
             Assert.AreEqual("Channel is configured with insecure channel credentials and can't use a HttpClient with a 'https' scheme.", ex.Message);
@@ -108,7 +109,7 @@ namespace Grpc.Net.Client.Tests
             {
                 HttpClient = new HttpClient(),
                 HttpHandler = new HttpClientHandler()
-            }));
+            }))!;
 
             // Assert
             Assert.AreEqual("HttpClient and HttpHandler have been configured. Only one HTTP caller can be specified.", ex.Message);
@@ -155,18 +156,38 @@ namespace Grpc.Net.Client.Tests
         public void Build_NoHttpProviderOnNetFx_Throw()
         {
             // Arrange & Act
-            var ex = Assert.Throws<PlatformNotSupportedException>(() => GrpcChannel.ForAddress("https://localhost"));
+            var ex = Assert.Throws<PlatformNotSupportedException>(() => GrpcChannel.ForAddress("https://localhost"))!;
 
             // Assert
             var message =
-                $"gRPC requires extra configuration to successfully make RPC calls on older platforms such " +
-                $"as .NET Framework. An HTTP provider must be specified using {nameof(GrpcChannelOptions)}.{nameof(GrpcChannelOptions.HttpHandler)} or " +
-                $"{nameof(GrpcChannelOptions)}.{nameof(GrpcChannelOptions.HttpClient)}. The configured HTTP provider must either support HTTP/2 or " +
-                $"be configured to use gRPC-Web. See https://aka.ms/pzkMXDs for details.";
+                $"gRPC requires extra configuration on .NET implementations that don't support gRPC over HTTP/2. " +
+                $"An HTTP provider must be specified using {nameof(GrpcChannelOptions)}.{nameof(GrpcChannelOptions.HttpHandler)}." +
+                $"The configured HTTP provider must either support HTTP/2 or be configured to use gRPC-Web. " +
+                $"See https://aka.ms/pzkMXDs for details.";
 
             Assert.AreEqual(message, ex.Message);
         }
 #endif
+
+        [Test]
+        public void Build_ServiceConfigDuplicateMethodConfigNames_Error()
+        {
+            // Arrange
+            var options = CreateGrpcChannelOptions(o => o.ServiceConfig = new ServiceConfig
+            {
+                MethodConfigs =
+                {
+                    new MethodConfig { Names = { MethodName.Default } },
+                    new MethodConfig { Names = { MethodName.Default } }
+                }
+            });
+
+            // Act
+            var ex = Assert.Throws<InvalidOperationException>(() => GrpcChannel.ForAddress("https://localhost", options))!;
+
+            // Assert
+            Assert.AreEqual("Duplicate method config found. Service: '', method: ''.", ex.Message);
+        }
 
         [Test]
         public void Dispose_NotCalled_NotDisposed()

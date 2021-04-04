@@ -53,7 +53,7 @@ namespace Grpc.Net.Client.Internal
                     break;
                 default:
                     // length%4 == 1 should be illegal
-                    throw new FormatException("Invalid base64 header value");
+                    throw new FormatException("Invalid Base-64 header value.");
             }
 
             return Convert.FromBase64String(decodable);
@@ -328,7 +328,7 @@ namespace Grpc.Net.Client.Internal
             }
         }
 
-        public static Status GetResponseStatus(HttpResponseMessage httpResponse, bool isBrowser)
+        public static Status GetResponseStatus(HttpResponseMessage httpResponse, bool isBrowser, bool isWinHttp)
         {
             Status? status;
             try
@@ -339,6 +339,10 @@ namespace Grpc.Net.Client.Internal
                     if (isBrowser)
                     {
                         detail += " If the gRPC call is cross domain then CORS must be correctly configured. Access-Control-Expose-Headers needs to include 'grpc-status' and 'grpc-message'.";
+                    }
+                    if (isWinHttp)
+                    {
+                        detail += " Using gRPC with WinHttp has Windows and package version requirements. See https://aka.ms/pzkMXDs for details.";
                     }
 
                     status = new Status(StatusCode.Cancelled, detail);
@@ -402,12 +406,23 @@ namespace Grpc.Net.Client.Internal
                 }
                 else if (current is IOException)
                 {
+                    // TODO(JamesNK): IOException is also returned for aborted requests.
+                    // Need to think about what is the best status for aborted requests.
+
                     // IOException happens if there is a protocol mismatch.
                     return StatusCode.Unavailable;
                 }
             } while ((current = current.InnerException) != null);
 
             return StatusCode.Internal;
+        }
+
+        public static Status CreateStatusFromException(string summary, Exception ex)
+        {
+            var exceptionMessage = CommonGrpcProtocolHelpers.ConvertToRpcExceptionMessage(ex);
+            var statusCode = ResolveRpcExceptionStatusCode(ex);
+
+            return new Status(statusCode, summary + " " + exceptionMessage, ex);
         }
     }
 }

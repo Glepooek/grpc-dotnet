@@ -23,7 +23,9 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Grpc.Core;
+using Grpc.Shared;
 using Microsoft.Extensions.Logging;
+using Log = Grpc.Net.Client.Internal.HttpContentClientStreamReaderLog;
 
 namespace Grpc.Net.Client.Internal
 {
@@ -31,10 +33,8 @@ namespace Grpc.Net.Client.Internal
         where TRequest : class
         where TResponse : class
     {
-        // Getting logger name from generic type is slow
+        // Getting logger name from generic type is slow. Cached copy.
         private const string LoggerName = "Grpc.Net.Client.Internal.HttpContentClientStreamReader";
-
-        private static readonly Task<bool> FinishedTask = Task.FromResult(false);
 
         private readonly GrpcCall<TRequest, TResponse> _call;
         private readonly ILogger _logger;
@@ -89,7 +89,7 @@ namespace Grpc.Net.Client.Internal
                 if (status.StatusCode == StatusCode.OK)
                 {
                     // Response is finished and it was successful so just return false
-                    return FinishedTask;
+                    return CommonGrpcProtocolHelpers.FalseTask;
                 }
                 else
                 {
@@ -145,7 +145,11 @@ namespace Grpc.Net.Client.Internal
                 {
                     try
                     {
+#if NET5_0
+                        _responseStream = await _httpResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+#else
                         _responseStream = await _httpResponse.Content.ReadAsStreamAsync().ConfigureAwait(false);
+#endif
                     }
                     catch (ObjectDisposedException)
                     {
@@ -156,7 +160,7 @@ namespace Grpc.Net.Client.Internal
                     }
                 }
 
-                CompatibilityExtensions.Assert(_grpcEncoding != null, "Encoding should have been calculated from response.");
+                CompatibilityHelpers.Assert(_grpcEncoding != null, "Encoding should have been calculated from response.");
 
                 Current = await _call.ReadMessageAsync(
                     _responseStream,
@@ -167,7 +171,7 @@ namespace Grpc.Net.Client.Internal
                 {
                     // No more content in response so report status to call.
                     // The call will handle finishing the response.
-                    var status = GrpcProtocolHelpers.GetResponseStatus(_httpResponse, _call.Channel.OperatingSystem.IsBrowser);
+                    var status = GrpcProtocolHelpers.GetResponseStatus(_httpResponse, _call.Channel.OperatingSystem.IsBrowser, _call.Channel.IsWinHttp);
                     _call.ResponseStreamEnded(status, finishedGracefully: true);
                     if (status.StatusCode != StatusCode.OK)
                     {
@@ -242,16 +246,16 @@ namespace Grpc.Net.Client.Internal
                 return moveNextTask != null && !moveNextTask.IsCompleted;
             }
         }
+    }
 
-        private static class Log
+    internal static class HttpContentClientStreamReaderLog
+    {
+        private static readonly Action<ILogger, Exception> _readMessageError =
+            LoggerMessage.Define(LogLevel.Error, new EventId(1, "ReadMessageError"), "Error reading message.");
+
+        public static void ReadMessageError(ILogger logger, Exception ex)
         {
-            private static readonly Action<ILogger, Exception> _readMessageError =
-                LoggerMessage.Define(LogLevel.Error, new EventId(1, "ReadMessageError"), "Error reading message.");
-
-            public static void ReadMessageError(ILogger logger, Exception ex)
-            {
-                _readMessageError(logger, ex);
-            }
+            _readMessageError(logger, ex);
         }
     }
 }
